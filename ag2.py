@@ -1,53 +1,86 @@
-# main.py
+# agno_version.py
 
-import nest_asyncio
-from autogen.agents.experimental import WebSurferAgent
-from autogen import AssistantAgent, LLMConfig
+from agno.agent import Agent
+from agno.team.team import Team
+from agno.models.google import Gemini
+from agno.tools.crawl4ai import Crawl4aiTools
+from agno.tools.duckduckgo import DuckDuckGoTools
 from customer_data import CUSTOMER_COMPANIES
-nest_asyncio.apply()
 
-print(CUSTOMER_COMPANIES)
-llm_config = LLMConfig(
-    # Let's choose the Llama 3 model
-    model="llama3-8b-8192",
-    # Put your Groq API key here or put it into the GROQ_API_KEY environment variable.
-    api_key="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" \
-    "",
-    # We specify the API Type as 'groq' so it uses the Groq client class
-    api_type="groq",
+# --- Custom Tools ---
+
+
+
+# --- Model ---
+
+gemini_model = Gemini(
+    id="gemini-2.5-flash-preview-05-20",
+    api_key="AIzaSyDADM15WDZJwCd0D5ed17mufolyClOnQ-8"
 )
 
-with llm_config:
-    customer_validator_agent = ConversableAgent(
+# --- Agents ---
+
+customer_validator_agent = Agent(
     name="CustomerValidatorAgent",
-    system_message= f"""Check if each company in the list is a valid customer. If not, report it and skip. If Valid customers then get the list of customers given and their end point from {CUSTOMER_COMPANIES} should proceed to WebScraperAgent. context:{CUSTOMER_COMPANIES} """)
-
-    websurfer_agent = WebSurferAgent(name="WebScraper agent",
-                llm_config=llm_config,
-                system_message=f"Get info from {CUSTOMER_COMPANIES} which has company names and list of end points respectively",
-                web_tool="crawl4ai")
-
-    web_search_agent = WebSurferAgent(
-        name="WebSearchAgent",
-        llm_config=llm_config,
-        system_message="Search the web for the most recent news for the provided companies. Focus only on recent updates.",
-        web_tool="browser_use"
-    )
-
-    formatter_agent = AssistantAgent(
-        name="FormatterAgent",
-        llm_config=llm_config,
-        system_message="Format the final results in a JSON format with keys: company, headline, and news."
-    )
-
-pattern = AutoPattern(
-    initial_agent=customer_vaidator_agent,
-    agents=[customer_vaidator_agent, websurfer_agent,web_search_agent, formatter_agent],
-    group_manager_args={"llm_config": llm_config}
+    model=gemini_model,
+    instructions=[
+        f"Check if the customer in the input is valid. if the customer is present in the CUSTOMER_COMPANIES dictionary then it is valid. if valid return the endpoints with respect to company name in a json format. If not, report and end workflow. context: {CUSTOMER_COMPANIES}. filter this dict and keep only the valid customers and their endpoints. "
+    ]
 )
 
-result, context, last_agent = initiate_group_chat(
-    pattern=pattern,
-    messages="get me the lates updates of apple inc.",
-    max_rounds=10
+webscraper_agent = Agent(
+    name="WebScraperAgent",
+    model=gemini_model,
+    tools=[Crawl4aiTools(max_length=None)],
+    instructions=[
+        "Scrape the provided endpoints for the latest news about the customer."
+    ],
+    show_tool_calls=True
 )
+
+websearch_agent = Agent(
+    name="WebSearchAgent",
+    model=gemini_model,
+    tools=[DuckDuckGoTools()],
+    instructions=[
+        "Search the web for the most recent news in the most reputed news websites. Focus only on recent updates."
+    ],
+    show_tool_calls=True
+)
+
+formatter_agent = Agent(
+    name="FormatterAgent",
+    model=gemini_model,
+    instructions=[
+        "Format the final results in a JSON format with keys: company, headline, source, date and news. return only the news of this month and not older"
+    ]
+)
+
+# --- Team (Workflow) ---
+
+team = Team(
+    name="Customer News Team",
+    mode="coordinate",  # or "route" or "collaborate" as fits your workflow
+    model=gemini_model,
+    members=[
+        customer_validator_agent,
+        webscraper_agent,
+        websearch_agent,
+        formatter_agent
+    ],
+    instructions=[
+        "1. CustomerValidatorAgent: Validate the customer from the user query. If valid, output a JSON with keys 'customer' and 'endpoints'. If not valid, stop and return an error message.",
+        "2. WebScraperAgent: Take the JSON from CustomerValidatorAgent, scrape each endpoint, and summarize the latest news. Output a list of news items with source and date.",
+        "3. WebSearchAgent: Take the news headline from webscraper agent and search for additional information on it on the web",
+        "4. FormatterAgent: Combine the results from WebScraperAgent and WebSearchAgent into a single JSON object with keys: company, news (list of news items, each with headline, source, date, and summary). Output only the JSON object. return only the news of this month and not older"
+    ]
+)
+
+# --- Run the workflow ---
+
+result = team.run("latest news of apple")
+print(result.content)
+
+
+
+
